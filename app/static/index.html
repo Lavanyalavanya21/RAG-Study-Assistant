@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Study Assistant</title>
+    <style>
+        :root {
+            --bg-color: #f5f5f5;
+            --sidebar-bg: #ececec;
+            --text-main: #2b2b2b;
+            --text-muted: #6b6b6b;
+            --border-color: #d1d1d1;
+            --chat-user: #e0e0e0;
+            --chat-bot: #ffffff;
+            --button-bg: #4a4a4a;
+            --button-hover: #2b2b2b;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+}
+
+        /* SIDEBAR */
+        .sidebar {
+    width: 280px;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+    flex-shrink: 0;
+    min-height: 0;
+}
+
+        .sidebar-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .sidebar-header span {
+            font-weight: 600;
+            font-size: 1em;
+        }
+
+        .logout-btn {
+            background: none;
+            border: 1px solid var(--border-color);
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            color: var(--text-muted);
+            font-size: 0.8em;
+        }
+
+        .logout-btn:hover { background-color: #dedede; color: var(--text-main); }
+
+        /* SUBJECTS */
+        .subjects-section {
+            padding: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .section-label {
+            font-size: 0.75em;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 8px;
+        }
+
+        .subject-item {
+            padding: 8px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+            color: var(--text-muted);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2px;
+        }
+
+        .subject-item:hover, .subject-item.active {
+            background-color: #dedede;
+            color: var(--text-main);
+        }
+
+        .add-subject-btn {
+            width: 100%;
+            padding: 8px;
+            background: none;
+            border: 1px dashed var(--border-color);
+            border-radius: 6px;
+            cursor: pointer;
+            color: var(--text-muted);
+            font-size: 0.85em;
+            margin-top: 6px;
+            text-align: center;
+        }
+
+        .add-subject-btn:hover { background-color: #dedede; color: var(--text-main); }
+
+        /* CHATS */
+        .chats-section {
+    flex-grow: 1;
+    padding: 12px;
+    overflow-y: auto;
+}
+
+        .chat-item {
+            padding: 8px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 2px;
+        }
+
+        .chat-item:hover, .chat-item.active {
+            background-color: #dedede;
+            color: var(--text-main);
+        }
+
+        .new-chat-btn {
+            width: 100%;
+            padding: 8px;
+            background-color: var(--button-bg);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            margin-bottom: 8px;
+        }
+
+        .new-chat-btn:hover { background-color: var(--button-hover); }
+
+        /* MAIN CHAT */
+        .main-chat {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+        .chat-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border-color);
+            background-color: #fff;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chat-header-title { font-weight: 600; }
+        .chat-header-subject { font-size: 0.85em; color: var(--text-muted); }
+
+        /* UPLOAD AREA */
+        .upload-area {
+            padding: 12px 20px;
+            background-color: #fff;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .upload-area label {
+            font-size: 0.85em;
+            color: var(--text-muted);
+        }
+
+        .upload-area input[type="file"] { font-size: 0.85em; }
+
+        .upload-btn {
+            padding: 6px 14px;
+            background-color: var(--button-bg);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+
+        .upload-btn:hover { background-color: var(--button-hover); }
+
+        .upload-status {
+            font-size: 0.8em;
+            color: var(--text-muted);
+        }
+
+        /* WELCOME SCREEN */
+        .welcome-screen {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: var(--text-muted);
+            gap: 10px;
+        }
+
+        .welcome-screen h2 { color: var(--text-main); }
+
+        /* CHAT WINDOW */
+        .chat-window {
+    flex-grow: 1;
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    min-height: 0;
+}
+
+        .message {
+            max-width: 75%;
+            padding: 14px 18px;
+            border-radius: 6px;
+            line-height: 1.6;
+            font-size: 0.95em;
+            white-space: pre-wrap;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background-color: var(--chat-user);
+            border-bottom-right-radius: 0;
+        }
+
+        .message.bot {
+            align-self: flex-start;
+            background-color: var(--chat-bot);
+            border: 1px solid var(--border-color);
+            border-bottom-left-radius: 0;
+        }
+
+        /* INPUT */
+        .input-area {
+            padding: 16px 20px;
+            background-color: #fff;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 12px;
+        }
+
+        input[type="text"] {
+            flex-grow: 1;
+            padding: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            outline: none;
+            font-size: 1em;
+            background-color: #fafafa;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--button-bg);
+            background-color: #fff;
+        }
+
+        button.send-btn {
+            padding: 0 24px;
+            background-color: var(--button-bg);
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 500;
+        }
+
+        button.send-btn:hover { background-color: var(--button-hover); }
+
+        /* MODAL */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.3);
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+
+        .modal-overlay.open { display: flex; }
+
+        .modal {
+            background: #fff;
+            border-radius: 10px;
+            padding: 30px;
+            width: 380px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .modal h3 { font-size: 1.1em; }
+
+        .modal input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 0.95em;
+            outline: none;
+        }
+
+        .modal-btns { display: flex; gap: 10px; justify-content: flex-end; }
+
+        .modal-btns button {
+            padding: 8px 18px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+            border: none;
+        }
+
+        .btn-cancel { background: var(--bg-color); color: var(--text-main); }
+        .btn-confirm { background: var(--button-bg); color: #fff; }
+    </style>
+</head>
+<body>
+
+<!-- SIDEBAR -->
+<div class="sidebar">
+    <div class="sidebar-header">
+        <span>📚 Study Assistant</span>
+        <button class="logout-btn" onclick="handleLogout()">Logout</button>
+    </div>
+
+    <div class="subjects-section">
+        <div class="section-label">Subjects</div>
+        <div id="subjectList"></div>
+        <button class="add-subject-btn" onclick="openAddSubject()">+ Add Subject</button>
+    </div>
+
+    <div class="chats-section">
+        <div class="section-label" style="margin-bottom:8px">Chats</div>
+        <button class="new-chat-btn" onclick="createNewChat()">+ New Chat</button>
+        <div id="chatList"></div>
+    </div>
+</div>
+
+<!-- MAIN CHAT -->
+<div class="main-chat">
+    <!-- Welcome screen (no subject selected) -->
+    <div class="welcome-screen" id="welcomeScreen">
+        <h2>Welcome to Study Assistant</h2>
+        <p>Select a subject from the sidebar or create a new one to get started.</p>
+    </div>
+
+    <!-- Chat UI (shown when subject selected) -->
+    <div id="chatUI" style="display:none; flex-direction:column; flex:1; min-height:0;">
+        <div class="chat-header">
+            <div>
+                <div class="chat-header-title" id="chatTitle">New Chat</div>
+                <div class="chat-header-subject" id="chatSubjectLabel"></div>
+            </div>
+        </div>
+
+        <div class="upload-area">
+            <label>Upload PDF/PPTX:</label>
+            <input type="file" id="fileInput" accept=".pdf,.pptx" multiple />
+            <button class="upload-btn" onclick="uploadFile()">Upload & Ingest</button>
+            <span class="upload-status" id="uploadStatus"></span>
+        </div>
+
+        <div class="chat-window" id="chatWindow"></div>
+
+        <div class="input-area">
+            <input type="text" id="userInput" placeholder="Ask your study assistant..." autocomplete="off" onkeypress="handleKeyPress(event)" />
+            <button class="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+</div>
+
+<!-- ADD SUBJECT MODAL -->
+<div class="modal-overlay" id="subjectModal">
+    <div class="modal">
+        <h3>Add New Subject</h3>
+        <input type="text" id="subjectNameInput" placeholder="e.g. Information Retrieval" />
+        <div class="modal-btns">
+            <button class="btn-cancel" onclick="closeModal()">Cancel</button>
+            <button class="btn-confirm" onclick="confirmAddSubject()">Create</button>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+    const SUPABASE_URL = "https://wfdecrzgzeirrhiiyosx.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndmZGVjcnpnemVpcnJoaWl5b3N4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2MDA1NjgsImV4cCI6MjA5MjE3NjU2OH0.A1qoy6NPz9JbAX0QfFLGoVssLHS6SM-FydLEFzOKVHY"; // paste your eyJ... key
+    const API_BASE = "http://127.0.0.1:8000";
+
+    const { createClient } = supabase;
+    const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    let currentUser = null;
+    let currentSubject = null;
+    let currentChatId = null;
+
+    // ── AUTH CHECK ──
+    async function init() {
+        const { data: { session } } = await sb.auth.getSession();
+        if (!session) {
+            window.location.href = "/static/auth.html";
+            return;
+        }
+        currentUser = session.user;
+        loadSubjects();
+    }
+
+    async function handleLogout() {
+        await sb.auth.signOut();
+        window.location.href = "/static/auth.html";
+    }
+
+    // ── SUBJECTS ──
+    async function loadSubjects() {
+        const { data } = await sb.from('subjects')
+            .select('*')
+            .order('created_at', { ascending: true });
+
+        const list = document.getElementById('subjectList');
+        list.innerHTML = '';
+        (data || []).forEach(s => {
+            const el = document.createElement('div');
+            el.className = 'subject-item' + (currentSubject?.id === s.id ? ' active' : '');
+            el.textContent = s.name;
+            el.onclick = () => selectSubject(s);
+            list.appendChild(el);
+        });
+    }
+
+    function openAddSubject() {
+        document.getElementById('subjectModal').classList.add('open');
+        document.getElementById('subjectNameInput').focus();
+    }
+
+    function closeModal() {
+        document.getElementById('subjectModal').classList.remove('open');
+        document.getElementById('subjectNameInput').value = '';
+    }
+
+    async function confirmAddSubject() {
+        const name = document.getElementById('subjectNameInput').value.trim();
+        if (!name) return;
+
+        const { data, error } = await sb.from('subjects').insert({
+            name,
+            user_id: currentUser.id
+        }).select().single();
+
+        closeModal();
+        if (!error) {
+            await loadSubjects();
+            selectSubject(data);
+        }
+    }
+
+    async function selectSubject(subject) {
+    currentSubject = subject;
+    currentChatId = null;
+
+    document.getElementById('welcomeScreen').style.display = 'none';
+    document.getElementById('chatUI').style.display = 'flex';
+    document.getElementById('chatSubjectLabel').textContent = subject.name;
+    document.getElementById('chatWindow').innerHTML = '';
+    document.getElementById('chatTitle').textContent = 'Select or create a chat';
+    document.getElementById('uploadStatus').textContent = '';
+    document.getElementById('fileInput').value = '';
+
+    await loadSubjects();
+    await loadChats();
+    await updateFileStatus();
+}
+
+    // ── CHATS ──
+    async function loadChats() {
+        if (!currentSubject) return;
+        const { data } = await sb.from('chats')
+            .select('*')
+            .eq('subject_id', currentSubject.id)
+            .order('created_at', { ascending: false });
+
+        const list = document.getElementById('chatList');
+        list.innerHTML = '';
+        (data || []).forEach(c => {
+            const el = document.createElement('div');
+            el.className = 'chat-item' + (currentChatId === c.id ? ' active' : '');
+            el.textContent = c.title;
+            el.onclick = () => selectChat(c);
+            list.appendChild(el);
+        });
+    }
+
+    async function createNewChat() {
+        if (!currentSubject) return alert('Please select a subject first.');
+
+        const { data, error } = await sb.from('chats').insert({
+            subject_id: currentSubject.id,
+            title: 'New Chat'
+        }).select().single();
+
+        if (!error) {
+            await loadChats();
+            selectChat(data);
+        }
+    }
+
+    async function selectChat(chat) {
+        currentChatId = chat.id;
+        document.getElementById('chatTitle').textContent = chat.title;
+        document.getElementById('chatWindow').innerHTML = '';
+        await loadChats(); // refresh active state
+        await loadMessages(chat.id);
+    }
+
+    // ── MESSAGES ──
+    async function loadMessages(chatId) {
+        const { data } = await sb.from('messages')
+            .select('*')
+            .eq('chat_id', chatId)
+            .order('created_at', { ascending: true });
+
+        (data || []).forEach(m => appendMessage(m.content, m.role === 'user' ? 'user' : 'bot'));
+    }
+
+    async function saveMessage(role, content) {
+        await sb.from('messages').insert({
+            chat_id: currentChatId,
+            role,
+            content
+        });
+    }
+
+    // ── SEND MESSAGE ──
+    async function sendMessage() {
+        const text = document.getElementById('userInput').value.trim();
+        if (!text) return;
+        if (!currentChatId) return alert('Please create or select a chat first.');
+        if (!currentSubject) return alert('Please select a subject first.');
+
+        appendMessage(text, 'user');
+        await saveMessage('user', text);
+        document.getElementById('userInput').value = '';
+
+        // Update chat title from first message
+        const { data: chatData } = await sb.from('chats').select('title').eq('id', currentChatId).single();
+        if (chatData?.title === 'New Chat') {
+            const newTitle = text.substring(0, 40);
+            await sb.from('chats').update({ title: newTitle }).eq('id', currentChatId);
+            document.getElementById('chatTitle').textContent = newTitle;
+            await loadChats();
+        }
+
+        appendMessage('⏳ Thinking...', 'bot', 'loading-msg');
+
+        try {
+            const res = await fetch(`${API_BASE}/ask`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question: text, subject_id: currentSubject.id })
+            });
+            const data = await res.json();
+
+            document.getElementById('loading-msg')?.remove();
+            const answer = data.answer?.answer || data.answer || 'No response.';
+            appendMessage(answer, 'bot');
+            await saveMessage('assistant', answer);
+
+        } catch (err) {
+            document.getElementById('loading-msg')?.remove();
+            appendMessage('❌ Error connecting to backend.', 'bot');
+        }
+    }
+
+    function appendMessage(text, sender, id = null) {
+        const chatWindow = document.getElementById('chatWindow');
+        const msgDiv = document.createElement('div');
+        msgDiv.classList.add('message', sender);
+        msgDiv.textContent = text;
+        if (id) msgDiv.id = id;
+        chatWindow.appendChild(msgDiv);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+
+    function handleKeyPress(event) {
+        if (event.key === 'Enter') sendMessage();
+    }
+
+    // ── FILE UPLOAD ──
+    async function uploadFile() {
+    if (!currentSubject) return alert('Please select a subject first.');
+    const fileInput = document.getElementById('fileInput');
+    const files = fileInput.files;
+    if (!files.length) return alert('Please select at least one file.');
+
+    const status = document.getElementById('uploadStatus');
+    status.textContent = `⏳ Uploading ${files.length} file(s)...`;
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('subject_id', currentSubject.id);
+
+        try {
+            const res = await fetch(`${API_BASE}/upload`, {
+                method: 'POST',
+                body: formData
+            });
+            const data = await res.json();
+            if (data.message) {
+                successCount++;
+                // Save filename to Supabase
+                await sb.from('subject_files').insert({
+                    subject_id: currentSubject.id,
+                    filename: file.name
+                });
+            } else {
+                failCount++;
+            }
+        } catch (err) {
+            failCount++;
+        }
+    }
+
+    fileInput.value = '';
+    await updateFileStatus();
+}
+
+async function updateFileStatus() {
+    if (!currentSubject) return;
+    const { data } = await sb.from('subject_files')
+        .select('filename')
+        .eq('subject_id', currentSubject.id);
+
+    const status = document.getElementById('uploadStatus');
+    const total = data?.length || 0;
+    status.textContent = `✅ ${total} file(s) ingested for this subject`;
+}
+
+    // ── INIT ──
+    init();
+</script>
+
+</body>
+</html>
