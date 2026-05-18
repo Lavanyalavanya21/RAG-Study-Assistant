@@ -1,10 +1,10 @@
-📚 RAG Information Retrieval Study Assistant
+RAG Information Retrieval Study Assistant
 A Retrieval-Augmented Generation (RAG) system that answers questions based on your IR lecture notes and slides. Upload your PDFs and PPTs, and query them conversationally through a clean chat interface.
 
-🛠 Tech Stack
+Tech Stack
 LayerTechnologyFrontendHTML, CSS, JavaScriptBackendFastAPIRAG FrameworkLangChainVector StoreFAISSEmbedding ModelHuggingFace Embeddings (sentence-transformers)LLMGroq (Llama3)ServerUvicorn
 
-📁 Project Structure
+Project Structure
 IR_RAG_Assistant/
 ├── app/
 │   ├── api/
@@ -30,7 +30,7 @@ IR_RAG_Assistant/
 ├── requirements.txt
 └── README.md
 
-🚀 Running Locally
+Running Locally
 1. Clone the repository
 bashgit clone https://github.com/yourusername/IR_RAG_Assistant.git
 cd IR_RAG_Assistant
@@ -55,7 +55,7 @@ bashpython -m uvicorn app.main:app --reload
 8. Open the frontend
 Go to http://127.0.0.1:8000 in your browser.
 
-➕ Adding New Study Materials
+Adding New Study Materials
 
 Drop new .pdf or .pptx files into data/raw/
 Re-run ingestion to rebuild the vector database:
@@ -79,12 +79,12 @@ Increasing k in rag_pipeline.py (retrieve more chunks, e.g. k=5)
 Adding more source documents to data/raw/
 
 
-🌐 Hosted Application
+Hosted Application
 
 Coming soon — deployment on Render (backend) and Netlify (frontend).
 
 
-📌 API Endpoints
+API Endpoints
 MethodEndpointDescriptionGET/Serves the frontendPOST/askAccepts a question, returns an answer
 Request body for /ask:
 json{
