@@ -171,13 +171,13 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
     const SUPABASE_URL = "https://wfdecrzgzeirrhiiyosx.supabase.co";
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndmZGVjcnpnemVpcnJoaWl5b3N4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2MDA1NjgsImV4cCI6MjA5MjE3NjU2OH0.A1qoy6NPz9JbAX0QfFLGoVssLHS6SM-FydLEFzOKVHY"; // eyJ... key
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndmZGVjcnpnemVpcnJoaWl5b3N4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2MDA1NjgsImV4cCI6MjA5MjE3NjU2OH0.A1qoy6NPz9JbAX0QfFLGoVssLHS6SM-FydLEFzOKVHY";
 
     const { createClient } = supabase;
     const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
     sb.auth.getSession().then(({ data }) => {
-        if (data.session) window.location.href = "/static/index.html";
+        if (data.session) window.location.href = "/index.html"; // ← fixed
     });
 
     function switchTab(tab) {
@@ -198,7 +198,7 @@
             errEl.textContent = error.message;
             errEl.style.display = 'block';
         } else {
-            window.location.href = "/static/index.html";
+            window.location.href = "/index.html"; // ← fixed
         }
     }
 
