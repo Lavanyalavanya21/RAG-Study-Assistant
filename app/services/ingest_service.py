@@ -8,14 +8,11 @@ from PIL import Image
 from groq import Groq
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 
 from app.core.config import EMBEDDING_MODEL, GROQ_API_KEY, SUPABASE_URL, SUPABASE_KEY
-
-VECTOR_BASE_PATH = "vectorstore"
 
 # ---------------------------------------------------------------------------
 # Clients (lazy init)
@@ -23,6 +20,7 @@ VECTOR_BASE_PATH = "vectorstore"
 
 _groq_client = None
 _supabase_client = None
+_embeddings = None
 
 
 def get_groq():
@@ -38,6 +36,13 @@ def get_supabase():
         from supabase import create_client
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _supabase_client
+
+
+def get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    return _embeddings
 
 
 # ---------------------------------------------------------------------------
@@ -80,20 +85,15 @@ def upload_to_storage(file_path: str, subject_id: str, original_name: str) -> st
 # ---------------------------------------------------------------------------
 
 def image_to_latex(image_bytes: bytes) -> str:
-    """
-    Try to extract a LaTeX formula from an image.
-    Returns empty string if pix2tex is unavailable or image is not an equation.
-    """
     try:
         from pix2tex.cli import LatexOCR
         img = Image.open(BytesIO(image_bytes)).convert("RGB")
         model = LatexOCR()
         latex = model(img).strip()
-        # Only return if it looks like actual math (contains letters + operators)
         if latex and any(c in latex for c in ["\\", "=", "^", "_", "frac"]):
             return f"$$ {latex} $$"
     except ImportError:
-        pass  # pix2tex not installed — skip silently
+        pass
     except Exception:
         pass
     return ""
@@ -104,13 +104,11 @@ def image_to_latex(image_bytes: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 def describe_image(image_bytes: bytes, surrounding_context: str = "", source_hint: str = "") -> str:
-    """Describe an image using Groq vision. Returns empty string for tiny/blank images."""
     try:
         img = Image.open(BytesIO(image_bytes))
         if img.width < 80 or img.height < 80:
             return ""
 
-        # Try equation OCR first — more precise than a vision description for math
         latex = image_to_latex(image_bytes)
         if latex:
             return f"Mathematical equation extracted from figure: {latex}"
@@ -216,7 +214,6 @@ def load_pptx(file_path: str, original_name: str) -> list[Document]:
                     metadata={"source": original_name, "slide": slide_num, "type": "image_description"}
                 ))
 
-    # Safety net: scan ppt/media/ in the zip for any missed images
     try:
         with zipfile.ZipFile(file_path) as z:
             for media_path in z.namelist():
@@ -278,7 +275,7 @@ def split_documents(documents: list[Document]) -> list[Document]:
     chunks = []
     for doc in documents:
         if doc.metadata.get("type") == "image_description":
-            chunks.append(doc)  # never split image descriptions
+            chunks.append(doc)
         else:
             for chunk in splitter.split_text(doc.page_content):
                 chunks.append(Document(page_content=chunk, metadata=doc.metadata))
@@ -286,26 +283,32 @@ def split_documents(documents: list[Document]) -> list[Document]:
 
 
 # ---------------------------------------------------------------------------
-# FAISS vectorstore (per subject)
+# pgvector — upsert chunks into Supabase
 # ---------------------------------------------------------------------------
 
-def get_vector_path(subject_id: str) -> str:
-    return os.path.join(VECTOR_BASE_PATH, subject_id)
-
-
 def upsert_vectorstore(chunks: list[Document], subject_id: str):
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    vector_path = get_vector_path(subject_id)
+    embeddings_model = get_embeddings()
+    sb = get_supabase()
 
-    if os.path.exists(vector_path):
-        db = FAISS.load_local(vector_path, embeddings, allow_dangerous_deserialization=True)
-        db.add_documents(chunks)
-    else:
-        db = FAISS.from_documents(chunks, embeddings)
+    texts = [chunk.page_content for chunk in chunks]
+    vectors = embeddings_model.embed_documents(texts)
 
-    os.makedirs(vector_path, exist_ok=True)
-    db.save_local(vector_path)
-    print(f"  [faiss] Saved {len(chunks)} chunks for subject '{subject_id}'")
+    rows = [
+        {
+            "subject_id": subject_id,
+            "content": chunk.page_content,
+            "metadata": chunk.metadata,
+            "embedding": vector,
+        }
+        for chunk, vector in zip(chunks, vectors)
+    ]
+
+    # Insert in batches of 100 to avoid request size limits
+    batch_size = 100
+    for i in range(0, len(rows), batch_size):
+        sb.table("documents").insert(rows[i:i + batch_size]).execute()
+
+    print(f"  [pgvector] Inserted {len(chunks)} chunks for subject '{subject_id}'")
 
 
 # ---------------------------------------------------------------------------

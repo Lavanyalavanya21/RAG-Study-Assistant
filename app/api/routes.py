@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 from app.services.qa_services import get_answer
-from app.services.ingest_service import ingest_file, get_vector_path
+from app.services.ingest_service import ingest_file
 import shutil
 import os
 
@@ -22,11 +22,6 @@ def ask(query: Query):
     try:
         answer = get_answer(query.question, query.subject_id)
         return {"answer": answer}
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No notes found for subject '{query.subject_id}'. Please upload files first."
-        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -77,23 +72,30 @@ async def upload(file: UploadFile = File(...), subject_id: str = Form(...)):
 
 @router.get("/status/{subject_id}")
 def ingestion_status(subject_id: str):
-    vector_path = get_vector_path(subject_id)
+    try:
+        from app.services.ingest_service import get_supabase
+        sb = get_supabase()
+        result = sb.table("documents") \
+            .select("id", count="exact") \
+            .eq("subject_id", subject_id) \
+            .execute()
 
-    if not os.path.exists(vector_path):
+        count = result.count or 0
+        if count == 0:
+            return {
+                "subject_id": subject_id,
+                "status": "not_found",
+                "message": "No notes ingested for this subject yet."
+            }
+
         return {
             "subject_id": subject_id,
-            "status": "not_found",
-            "message": "No notes ingested for this subject yet."
+            "status": "ready",
+            "chunks": count,
+            "message": f"{count} chunks ingested and ready for querying."
         }
-
-    # Count index files as a proxy for stored chunks
-    files = os.listdir(vector_path)
-    return {
-        "subject_id": subject_id,
-        "status": "ready",
-        "vector_store_files": files,
-        "message": "Notes are ingested and ready for querying."
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------------------------

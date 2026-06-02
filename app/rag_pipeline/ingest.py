@@ -4,76 +4,138 @@ import zipfile
 from io import BytesIO
 
 import fitz  # pymupdf
-from groq import Groq
 from PIL import Image
+from groq import Groq
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
-from config import DATA_PATH, VECTOR_DB_PATH, EMBEDDING_MODEL
+from app.core.config import EMBEDDING_MODEL, GROQ_API_KEY, SUPABASE_URL, SUPABASE_KEY
 
 # ---------------------------------------------------------------------------
-# Groq vision client
+# Clients (lazy init)
 # ---------------------------------------------------------------------------
 
 _groq_client = None
+_supabase_client = None
+_embeddings = None
 
-def get_groq_client():
+
+def get_groq():
     global _groq_client
     if _groq_client is None:
-        from app.core.config import GROQ_API_KEY
         _groq_client = Groq(api_key=GROQ_API_KEY)
     return _groq_client
 
 
+def get_supabase():
+    global _supabase_client
+    if _supabase_client is None:
+        from supabase import create_client
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase_client
+
+
+def get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    return _embeddings
+
+
 # ---------------------------------------------------------------------------
-# Vision: describe an image using Groq
+# Supabase Storage — upload raw file
+# ---------------------------------------------------------------------------
+
+def upload_to_storage(file_path: str, subject_id: str, original_name: str) -> str:
+    """Upload raw file to Supabase Storage. Returns public URL."""
+    bucket = "study-notes"
+    storage_path = f"{subject_id}/{original_name}"
+
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
+    mime = "application/pdf"
+    if original_name.endswith(".pptx"):
+        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    elif original_name.endswith(".docx"):
+        mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif original_name.lower().endswith((".png", ".jpg", ".jpeg")):
+        mime = "image/png"
+
+    try:
+        sb = get_supabase()
+        sb.storage.from_(bucket).upload(
+            storage_path,
+            file_bytes,
+            {"content-type": mime, "upsert": "true"}
+        )
+        url = sb.storage.from_(bucket).get_public_url(storage_path)
+        print(f"  [storage] Uploaded {original_name} → {url}")
+        return url
+    except Exception as e:
+        print(f"  [storage] Upload failed for {original_name}: {e}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Equation OCR via pix2tex (LaTeX)
+# ---------------------------------------------------------------------------
+
+def image_to_latex(image_bytes: bytes) -> str:
+    try:
+        from pix2tex.cli import LatexOCR
+        img = Image.open(BytesIO(image_bytes)).convert("RGB")
+        model = LatexOCR()
+        latex = model(img).strip()
+        if latex and any(c in latex for c in ["\\", "=", "^", "_", "frac"]):
+            return f"$$ {latex} $$"
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Vision: describe image via Groq
 # ---------------------------------------------------------------------------
 
 def describe_image(image_bytes: bytes, surrounding_context: str = "", source_hint: str = "") -> str:
-    """
-    Send an image to Groq's vision model and get a detailed text description.
-    Returns empty string if the image is too small / blank to be meaningful.
-    """
     try:
         img = Image.open(BytesIO(image_bytes))
-        # Skip tiny decorative images (icons, bullets, logos, etc.)
         if img.width < 80 or img.height < 80:
             return ""
 
-        # Re-encode as JPEG for the API (keeps payload small)
+        latex = image_to_latex(image_bytes)
+        if latex:
+            return f"Mathematical equation extracted from figure: {latex}"
+
         buf = BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=85)
         b64 = base64.b64encode(buf.getvalue()).decode()
 
-        context_hint = f"\nSurrounding text context: {surrounding_context[:300]}" if surrounding_context else ""
-        source_note  = f"\nSource file: {source_hint}" if source_hint else ""
+        ctx = f"\nSurrounding text: {surrounding_context[:300]}" if surrounding_context else ""
+        src = f"\nSource: {source_hint}" if source_hint else ""
 
-        response = get_groq_client().chat.completions.create(
+        response = get_groq().chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "You are processing a study note or academic slide.{context_hint}{source_note}\n\n"
-                            "Describe this image in detail for a student who cannot see it:\n"
-                            "- What type of figure is it? (diagram, graph, chart, flowchart, equation, table, photo, etc.)\n"
-                            "- What concept or topic does it illustrate?\n"
-                            "- Label ALL axes, components, boxes, arrows, and annotations visible.\n"
-                            "- Extract ALL numerical values, formulas, or equations present.\n"
-                            "- Describe any trends, relationships, or key takeaways shown.\n"
-                            "Be thorough — this description will be used for retrieval."
-                        ).format(context_hint=context_hint, source_note=source_note)
-                    }
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    {"type": "text", "text": (
+                        f"You are processing a study note or academic slide.{ctx}{src}\n\n"
+                        "Describe this image for a student who cannot see it:\n"
+                        "- What type of figure is it? (diagram, graph, chart, flowchart, table, photo, etc.)\n"
+                        "- What concept does it illustrate?\n"
+                        "- Label ALL axes, components, boxes, arrows, and annotations.\n"
+                        "- Extract ALL numerical values, formulas, or equations.\n"
+                        "- Describe key trends, relationships, or takeaways.\n"
+                        "Be thorough — this description is used for retrieval."
+                    )}
                 ]
             }],
             max_tokens=600
@@ -86,260 +148,215 @@ def describe_image(image_bytes: bytes, surrounding_context: str = "", source_hin
 
 
 # ---------------------------------------------------------------------------
-# PDF loading — text blocks + embedded images
+# File loaders
 # ---------------------------------------------------------------------------
 
-def load_pdf(file_path: str) -> list[Document]:
+def load_pdf(file_path: str, original_name: str) -> list[Document]:
     docs = []
-    filename = os.path.basename(file_path)
     doc = fitz.open(file_path)
 
     for page_num, page in enumerate(doc, start=1):
-        # --- Text ---
         text = page.get_text("text").strip()
         if text:
             docs.append(Document(
                 page_content=text,
-                metadata={"source": filename, "page": page_num, "type": "text"}
+                metadata={"source": original_name, "page": page_num, "type": "text"}
             ))
 
-        # --- Images ---
-        image_list = page.get_images(full=True)
-        for img_index, img_info in enumerate(image_list):
+        for img_index, img_info in enumerate(page.get_images(full=True)):
             xref = img_info[0]
             try:
                 base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                description = describe_image(image_bytes, surrounding_context=text, source_hint=filename)
+                description = describe_image(base_image["image"], surrounding_context=text, source_hint=original_name)
                 if description:
-                    print(f"  [vision] Described image {img_index+1} on page {page_num} of {filename}")
+                    print(f"  [vision] Page {page_num}, image {img_index+1} — described")
                     docs.append(Document(
                         page_content=f"[Figure on page {page_num}]: {description}",
-                        metadata={"source": filename, "page": page_num, "type": "image_description"}
+                        metadata={"source": original_name, "page": page_num, "type": "image_description"}
                     ))
             except Exception as e:
-                print(f"  [vision] Skipped image {img_index+1} on page {page_num}: {e}")
+                print(f"  [vision] Skipped image on page {page_num}: {e}")
 
     doc.close()
     return docs
 
 
-# ---------------------------------------------------------------------------
-# PPTX loading — text shapes + image shapes
-# ---------------------------------------------------------------------------
-
-def load_pptx(file_path: str) -> list[Document]:
+def load_pptx(file_path: str, original_name: str) -> list[Document]:
     docs = []
-    filename = os.path.basename(file_path)
     prs = Presentation(file_path)
 
     for slide_num, slide in enumerate(prs.slides, start=1):
-        slide_text_parts = []
+        text_parts = []
         image_blobs = []
 
         for shape in slide.shapes:
-            # Text
             if hasattr(shape, "text") and shape.text.strip():
-                slide_text_parts.append(shape.text.strip())
-
-            # Inline pictures
+                text_parts.append(shape.text.strip())
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                 try:
                     image_blobs.append(shape.image.blob)
                 except Exception:
                     pass
 
-        slide_text = "\n".join(slide_text_parts).strip()
-
+        slide_text = "\n".join(text_parts).strip()
         if slide_text:
             docs.append(Document(
                 page_content=slide_text,
-                metadata={"source": filename, "slide": slide_num, "type": "text"}
+                metadata={"source": original_name, "slide": slide_num, "type": "text"}
             ))
 
-        for img_index, blob in enumerate(image_blobs):
-            description = describe_image(blob, surrounding_context=slide_text, source_hint=filename)
+        for idx, blob in enumerate(image_blobs):
+            description = describe_image(blob, surrounding_context=slide_text, source_hint=original_name)
             if description:
-                print(f"  [vision] Described image {img_index+1} on slide {slide_num} of {filename}")
+                print(f"  [vision] Slide {slide_num}, image {idx+1} — described")
                 docs.append(Document(
                     page_content=f"[Figure on slide {slide_num}]: {description}",
-                    metadata={"source": filename, "slide": slide_num, "type": "image_description"}
+                    metadata={"source": original_name, "slide": slide_num, "type": "image_description"}
                 ))
 
-    # Also extract images packed inside the .pptx zip (covers grouped/embedded objects)
-    _extract_pptx_zip_images(file_path, filename, docs)
+    try:
+        with zipfile.ZipFile(file_path) as z:
+            for media_path in z.namelist():
+                if media_path.startswith("ppt/media/") and media_path.lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".gif", ".bmp")
+                ):
+                    description = describe_image(z.read(media_path), source_hint=original_name)
+                    if description:
+                        docs.append(Document(
+                            page_content=f"[Embedded media — {os.path.basename(media_path)}]: {description}",
+                            metadata={"source": original_name, "type": "image_description"}
+                        ))
+    except Exception as e:
+        print(f"  [pptx-zip] Could not scan media: {e}")
 
     return docs
 
 
-def _extract_pptx_zip_images(file_path: str, filename: str, docs: list[Document]):
-    """
-    PPTX is a ZIP. Images not captured by python-pptx shapes often live
-    in ppt/media/. This extracts them as a safety net.
-    Already-described images won't cause harm — duplicates are filtered
-    at the embedding stage by FAISS cosine dedup (similar vectors cluster).
-    """
-    already_described = {
-        doc.metadata.get("slide")
-        for doc in docs
-        if doc.metadata.get("type") == "image_description"
-    }
-
-    try:
-        with zipfile.ZipFile(file_path) as z:
-            media_files = [f for f in z.namelist() if f.startswith("ppt/media/")
-                           and f.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp"))]
-            for media_path in media_files:
-                image_bytes = z.read(media_path)
-                description = describe_image(image_bytes, source_hint=filename)
-                if description:
-                    docs.append(Document(
-                        page_content=f"[Embedded media — {os.path.basename(media_path)}]: {description}",
-                        metadata={"source": filename, "type": "image_description", "media_file": media_path}
-                    ))
-    except Exception as e:
-        print(f"  [pptx-zip] Could not scan media in {filename}: {e}")
-
-
-# ---------------------------------------------------------------------------
-# DOCX loading — text + embedded images
-# ---------------------------------------------------------------------------
-
-def load_docx(file_path: str) -> list[Document]:
-    """
-    Extract text paragraphs and embedded images from a .docx file.
-    """
+def load_docx(file_path: str, original_name: str) -> list[Document]:
     from docx import Document as DocxDocument
-
     docs = []
-    filename = os.path.basename(file_path)
 
     try:
         docx = DocxDocument(file_path)
         full_text = "\n".join(p.text for p in docx.paragraphs if p.text.strip())
-
         if full_text:
             docs.append(Document(
                 page_content=full_text,
-                metadata={"source": filename, "type": "text"}
+                metadata={"source": original_name, "type": "text"}
             ))
 
-        # Images are in the zip under word/media/
         with zipfile.ZipFile(file_path) as z:
-            media_files = [f for f in z.namelist() if f.startswith("word/media/")
-                           and f.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp"))]
-            for media_path in media_files:
-                image_bytes = z.read(media_path)
-                description = describe_image(image_bytes, surrounding_context=full_text[:300], source_hint=filename)
-                if description:
-                    print(f"  [vision] Described {os.path.basename(media_path)} in {filename}")
-                    docs.append(Document(
-                        page_content=f"[Figure in {filename}]: {description}",
-                        metadata={"source": filename, "type": "image_description", "media_file": media_path}
-                    ))
+            for media_path in z.namelist():
+                if media_path.startswith("word/media/") and media_path.lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".gif", ".bmp")
+                ):
+                    description = describe_image(
+                        z.read(media_path),
+                        surrounding_context=full_text[:300],
+                        source_hint=original_name
+                    )
+                    if description:
+                        docs.append(Document(
+                            page_content=f"[Figure in {original_name}]: {description}",
+                            metadata={"source": original_name, "type": "image_description"}
+                        ))
     except Exception as e:
-        print(f"  [docx] Error loading {filename}: {e}")
+        print(f"  [docx] Error loading {original_name}: {e}")
 
     return docs
 
 
 # ---------------------------------------------------------------------------
-# Load all documents from DATA_PATH
-# ---------------------------------------------------------------------------
-
-def load_documents() -> list[Document]:
-    docs = []
-
-    for file in os.listdir(DATA_PATH):
-        file_path = os.path.join(DATA_PATH, file)
-
-        if file.endswith(".pdf"):
-            print(f"Loading PDF: {file}")
-            docs.extend(load_pdf(file_path))
-
-        elif file.endswith(".pptx"):
-            print(f"Loading PPTX: {file}")
-            docs.extend(load_pptx(file_path))
-
-        elif file.endswith(".docx"):
-            print(f"Loading DOCX: {file}")
-            docs.extend(load_docx(file_path))
-
-        elif file.lower().endswith((".png", ".jpg", ".jpeg")):
-            print(f"Loading image: {file}")
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
-            description = describe_image(image_bytes, source_hint=file)
-            if description:
-                docs.append(Document(
-                    page_content=f"[Image file — {file}]: {description}",
-                    metadata={"source": file, "type": "image_description"}
-                ))
-
-    return docs
-
-
-# ---------------------------------------------------------------------------
-# Chunking — respects chunk_type; image descriptions are NOT split
+# Chunking
 # ---------------------------------------------------------------------------
 
 def split_documents(documents: list[Document]) -> list[Document]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=100
-    )
-
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
     chunks = []
     for doc in documents:
         if doc.metadata.get("type") == "image_description":
-            # Keep image descriptions whole — splitting breaks their meaning
             chunks.append(doc)
         else:
-            split_texts = splitter.split_text(doc.page_content)
-            for chunk in split_texts:
-                chunks.append(Document(
-                    page_content=chunk,
-                    metadata=doc.metadata
-                ))
-
+            for chunk in splitter.split_text(doc.page_content):
+                chunks.append(Document(page_content=chunk, metadata=doc.metadata))
     return chunks
 
 
 # ---------------------------------------------------------------------------
-# Vectorstore
+# pgvector — upsert chunks into Supabase
 # ---------------------------------------------------------------------------
 
-def create_vectorstore(chunks: list[Document]):
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    os.makedirs(VECTOR_DB_PATH, exist_ok=True)
-    db = FAISS.from_documents(chunks, embeddings)
-    db.save_local(VECTOR_DB_PATH)
+def upsert_vectorstore(chunks: list[Document], subject_id: str):
+    embeddings_model = get_embeddings()
+    sb = get_supabase()
+
+    texts = [chunk.page_content for chunk in chunks]
+    vectors = embeddings_model.embed_documents(texts)
+
+    rows = [
+        {
+            "subject_id": subject_id,
+            "content": chunk.page_content,
+            "metadata": chunk.metadata,
+            "embedding": vector,
+        }
+        for chunk, vector in zip(chunks, vectors)
+    ]
+
+    # Insert in batches of 100 to avoid request size limits
+    batch_size = 100
+    for i in range(0, len(rows), batch_size):
+        sb.table("documents").insert(rows[i:i + batch_size]).execute()
+
+    print(f"  [pgvector] Inserted {len(chunks)} chunks for subject '{subject_id}'")
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Public entry point
 # ---------------------------------------------------------------------------
 
-def main():
-    print("Loading documents")
-    documents = load_documents()
+def ingest_file(file_path: str, subject_id: str, original_name: str = None):
+    if original_name is None:
+        original_name = os.path.basename(file_path)
 
-    if not documents:
-        print("No documents found in data/raw/")
-        return
+    ext = original_name.lower()
 
-    text_docs  = [d for d in documents if d.metadata.get("type") == "text"]
-    image_docs = [d for d in documents if d.metadata.get("type") == "image_description"]
-    print(f"Loaded {len(documents)} documents — {len(text_docs)} text, {len(image_docs)} image descriptions")
+    # 1. Upload raw file to Supabase Storage
+    storage_url = upload_to_storage(file_path, subject_id, original_name)
 
-    print("Splitting documents into chunks")
-    chunks = split_documents(documents)
-    print(f"Created {len(chunks)} chunks")
+    # 2. Extract text + image descriptions
+    if ext.endswith(".pdf"):
+        docs = load_pdf(file_path, original_name)
+    elif ext.endswith(".pptx"):
+        docs = load_pptx(file_path, original_name)
+    elif ext.endswith(".docx"):
+        docs = load_docx(file_path, original_name)
+    elif ext.endswith((".png", ".jpg", ".jpeg")):
+        with open(file_path, "rb") as f:
+            image_bytes = f.read()
+        description = describe_image(image_bytes, source_hint=original_name)
+        docs = [Document(
+            page_content=f"[Image file — {original_name}]: {description}",
+            metadata={"source": original_name, "type": "image_description"}
+        )] if description else []
+    else:
+        raise ValueError(f"Unsupported file type: {original_name}")
 
-    print("Creating embeddings and saving vector database")
-    create_vectorstore(chunks)
-    print("Ingestion complete")
+    if not docs:
+        print(f"  [ingest] No content extracted from {original_name}")
+        return {"chunks": 0, "storage_url": storage_url}
 
+    # 3. Chunk + embed + store
+    chunks = split_documents(docs)
+    upsert_vectorstore(chunks, subject_id)
 
-if __name__ == "__main__":
-    main()
+    text_count  = sum(1 for d in docs if d.metadata.get("type") == "text")
+    image_count = sum(1 for d in docs if d.metadata.get("type") == "image_description")
+    print(f"  [ingest] {original_name}: {text_count} text docs, {image_count} image descriptions → {len(chunks)} chunks")
+
+    return {
+        "chunks": len(chunks),
+        "text_docs": text_count,
+        "image_descriptions": image_count,
+        "storage_url": storage_url
+    }

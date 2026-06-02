@@ -1,46 +1,125 @@
 import re
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from app.core.config import EMBEDDING_MODEL, LLM_MODEL, GROQ_API_KEY
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from app.core.config import EMBEDDING_MODEL, LLM_MODEL, GROQ_API_KEY, SUPABASE_URL, SUPABASE_KEY
 
-VECTOR_BASE_PATH = "vectorstore"
+# ---------------------------------------------------------------------------
+# Lazy clients
+# ---------------------------------------------------------------------------
+
+_embeddings = None
+_supabase_client = None
+
+
+def get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    return _embeddings
+
+
+def get_supabase():
+    global _supabase_client
+    if _supabase_client is None:
+        from supabase import create_client
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase_client
 
 
 # ---------------------------------------------------------------------------
-# Detect if the query mentions a specific source filename
+# pgvector similarity search
 # ---------------------------------------------------------------------------
 
-def detect_source_filter(query: str, db: FAISS) -> str | None:
+def similarity_search(query: str, subject_id: str, k: int = 5, source_filter: str = None) -> list[Document]:
     """
-    Scan all document metadata in the FAISS index.
-    If the query mentions tokens that match a source filename, return that filename.
+    Embed the query and run a cosine similarity search against the documents table.
+    Optionally filter by source filename.
+    """
+    embedding = get_embeddings().embed_query(query)
+    sb = get_supabase()
+
+    # Call the match_documents RPC function (defined in Supabase SQL below)
+    params = {
+        "query_embedding": embedding,
+        "match_subject_id": subject_id,
+        "match_count": k,
+    }
+    if source_filter:
+        params["match_source"] = source_filter
+
+    rpc_name = "match_documents_filtered" if source_filter else "match_documents"
+    result = sb.rpc(rpc_name, params).execute()
+
+    docs = []
+    for row in (result.data or []):
+        docs.append(Document(
+            page_content=row["content"],
+            metadata=row.get("metadata", {})
+        ))
+    return docs
+
+
+# ---------------------------------------------------------------------------
+# Fetch ALL chunks for a subject+source (full content queries)
+# ---------------------------------------------------------------------------
+
+def fetch_all_chunks(subject_id: str, source_filter: str) -> list[Document]:
+    """
+    Retrieve every text chunk for a given subject and source file,
+    sorted by page/slide number for coherent reading order.
+    """
+    sb = get_supabase()
+    result = sb.table("documents") \
+        .select("content, metadata") \
+        .eq("subject_id", subject_id) \
+        .execute()
+
+    docs = []
+    for row in (result.data or []):
+        meta = row.get("metadata", {})
+        if (meta.get("source") == source_filter
+                and meta.get("type") == "text"):
+            docs.append(Document(page_content=row["content"], metadata=meta))
+
+    # Sort by slide or page number
+    docs.sort(key=lambda d: d.metadata.get("slide") or d.metadata.get("page") or 0)
+    return docs
+
+
+# ---------------------------------------------------------------------------
+# Detect if query targets a specific source file
+# ---------------------------------------------------------------------------
+
+def detect_source_filter(query: str, subject_id: str) -> str | None:
+    """
+    Fetch all unique source filenames for the subject from Supabase,
+    then match against query tokens.
     e.g. query "syllabus of unit3 ppt" matches source "Unit3.pptx"
     """
-    query_lower = query.lower()
+    sb = get_supabase()
+    result = sb.table("documents") \
+        .select("metadata") \
+        .eq("subject_id", subject_id) \
+        .execute()
 
-    # Collect all unique source filenames
     all_sources = set()
-    for doc_id in db.docstore._dict:
-        doc = db.docstore._dict[doc_id]
-        source = doc.metadata.get("source", "")
+    for row in (result.data or []):
+        source = row.get("metadata", {}).get("source", "")
         if source:
             all_sources.add(source)
 
+    query_lower = query.lower()
     best_match = None
     best_score = 0
 
     for source in all_sources:
-        # Normalize filename: remove extension, lowercase, split on spaces/underscores/hyphens
         name = re.sub(r'\.(pptx|pdf|docx|png|jpg|jpeg)$', '', source.lower())
         tokens = re.split(r'[\s_\-]+', name)
-
-        # Score = number of filename tokens found in the query
         score = sum(1 for token in tokens if token and len(token) > 1 and token in query_lower)
-
         if score > best_score:
             best_score = score
             best_match = source
@@ -52,32 +131,25 @@ def detect_source_filter(query: str, db: FAISS) -> str | None:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def ask_question(query: str, subject_id: str):
-    vector_path = f"{VECTOR_BASE_PATH}/{subject_id}"
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    db = FAISS.load_local(vector_path, embeddings, allow_dangerous_deserialization=True)
+def ask_question(query: str, subject_id: str) -> str:
+    source_filter = detect_source_filter(query, subject_id)
 
-    source_filter = detect_source_filter(query, db)
-
-    # Detect if this is a "full content" query needing all chunks
-    full_content_keywords = ["syllabus", "all topics", "full content", "overview",
-                             "summarize all", "list all", "what all", "entire", "complete"]
+    full_content_keywords = [
+        "syllabus", "all topics", "full content", "overview",
+        "summarize all", "list all", "what all", "entire", "complete"
+    ]
     is_full_content_query = any(kw in query.lower() for kw in full_content_keywords)
 
-    if source_filter and is_full_content_query:
-        # Fetch ALL chunks from this source, not just top-k
-        all_docs = list(db.docstore._dict.values())
-        filtered_docs = [
-            doc for doc in all_docs
-            if doc.metadata.get("source") == source_filter
-            and doc.metadata.get("type") == "text"  # skip image descriptions for syllabus
-        ]
-        # Sort by page/slide number for coherent reading order
-        filtered_docs.sort(key=lambda d: d.metadata.get("slide") or d.metadata.get("page") or 0)
-        context = "\n\n".join(doc.page_content for doc in filtered_docs)
-        docs_for_sources = filtered_docs
+    llm = ChatGroq(model=LLM_MODEL, api_key=GROQ_API_KEY)
 
-        llm = ChatGroq(model=LLM_MODEL, api_key=GROQ_API_KEY)
+    if source_filter and is_full_content_query:
+        # Fetch ALL text chunks from this source in reading order
+        filtered_docs = fetch_all_chunks(subject_id, source_filter)
+
+        if not filtered_docs:
+            return f"No content found for '{source_filter}' in this subject."
+
+        context = "\n\n".join(doc.page_content for doc in filtered_docs)
         prompt_text = (
             f"You are a study assistant. Using ALL the content below from {source_filter}, "
             f"answer the question thoroughly.\n\n"
@@ -85,17 +157,17 @@ def ask_question(query: str, subject_id: str):
             f"Question: {query}\n\nAnswer:"
         )
         answer = llm.invoke(prompt_text).content
+        docs_for_sources = filtered_docs
 
     else:
-        # Normal retrieval path
-        if source_filter:
-            retriever = db.as_retriever(
-                search_kwargs={"k": 6, "filter": {"source": source_filter}}
-            )
-        else:
-            retriever = db.as_retriever(search_kwargs={"k": 5})
+        # Normal retrieval: cosine similarity search
+        k = 6 if source_filter else 5
+        docs_for_sources = similarity_search(query, subject_id, k=k, source_filter=source_filter)
 
-        llm = ChatGroq(model=LLM_MODEL, api_key=GROQ_API_KEY)
+        if not docs_for_sources:
+            return "No relevant content found. Please upload notes for this subject first."
+
+        context = "\n\n".join(doc.page_content for doc in docs_for_sources)
         source_hint = f"Answer only using content from the file: {source_filter}\n\n" if source_filter else ""
 
         prompt = PromptTemplate.from_template(
@@ -117,9 +189,9 @@ def ask_question(query: str, subject_id: str):
 
         chain = (
             {
-                "context": retriever,
+                "context": RunnableLambda(lambda _: context),
                 "question": RunnablePassthrough(),
-                "source_hint": RunnableLambda(lambda _: source_hint)
+                "source_hint": RunnableLambda(lambda _: source_hint),
             }
             | prompt
             | llm
@@ -127,7 +199,6 @@ def ask_question(query: str, subject_id: str):
         )
 
         answer = chain.invoke(query)
-        docs_for_sources = retriever.invoke(query)
 
     # Build sources footer
     source_text = "\n\n📚 Sources:\n"
